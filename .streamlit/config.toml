@@ -1,0 +1,11 @@
+[python]
+version = "3.11"
+
+[client]
+showErrorDetails = true
+
+[logger]
+level = "debug"
+
+[server]
+maxUploadSize = 200
