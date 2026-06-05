@@ -1,0 +1,50 @@
+name: Deploy to Streamlit Cloud
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r flower_app/requirements.txt
+    
+    - name: Run tests
+      run: |
+        cd flower_app
+        python test_app.py
+    
+    - name: Run model analysis
+      run: |
+        cd flower_app
+        python model_analysis.py
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Deploy to Streamlit Cloud
+      run: |
+        echo "Deployment to Streamlit Cloud"
+        echo "Push the 'Deploy' button on Streamlit Cloud dashboard"
+        echo "Repository URL: https://github.com/${{ github.repository }}"
