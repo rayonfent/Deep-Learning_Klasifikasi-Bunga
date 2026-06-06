@@ -1,5 +1,6 @@
 ﻿import os
 import pickle
+from pathlib import Path
 
 import numpy as np
 import streamlit as st
@@ -15,8 +16,27 @@ st.set_page_config(
 st.title("Flower Classification App")
 st.caption("Classify flower images using the SVM model.")
 
-app_dir = os.environ.get("APP_DIR", os.path.dirname(__file__))
-svm_model_path = os.path.join(app_dir, "svm_mkl_bundle.pkl")
+app_dir = Path(os.environ.get("APP_DIR", os.path.dirname(__file__))).resolve()
+repo_dir = app_dir.parent
+
+
+def get_candidate_model_paths(filename):
+    """Return candidate model locations for local and Streamlit Cloud runs."""
+    return [
+        app_dir / filename,
+        repo_dir / filename,
+        Path.cwd() / filename,
+        Path.cwd() / "flower_app" / filename,
+    ]
+
+
+def resolve_model_path(filename):
+    """Resolve the first existing model path from known candidate locations."""
+    for path in get_candidate_model_paths(filename):
+        if path.exists():
+            return path
+    return None
+
 
 FLOWER_CLASSES = [
     "Daisy",
@@ -30,11 +50,31 @@ FLOWER_CLASSES = [
 @st.cache_resource
 def load_svm_model():
     """Load the SVM model."""
+    model_path = resolve_model_path("svm_mkl_bundle.pkl")
+
+    if model_path is None:
+        st.error(
+            "Error loading SVM model: file `svm_mkl_bundle.pkl` was not found "
+            f"in expected locations: {', '.join(str(path) for path in get_candidate_model_paths('svm_mkl_bundle.pkl'))}"
+        )
+        return None
+
     try:
-        with open(svm_model_path, "rb") as model_file:
+        with open(model_path, "rb") as model_file:
+            header = model_file.read(16)
+            model_file.seek(0)
+
+            if not header.startswith(b"\x80"):
+                preview = header.decode("utf-8", errors="replace")
+                raise ValueError(
+                    "model file is not a valid pickle binary. "
+                    f"Resolved path: {model_path}. "
+                    f"File header preview: {preview!r}"
+                )
+
             return pickle.load(model_file)
     except Exception as exc:
-        st.error(f"Error loading SVM model: {exc}")
+        st.error(f"Error loading SVM model from `{model_path}`: {exc}")
         return None
 
 
@@ -67,6 +107,12 @@ def predict_svm(image):
 
 st.sidebar.header("Configuration")
 st.sidebar.success("Active model: SVM")
+
+resolved_svm_path = resolve_model_path("svm_mkl_bundle.pkl")
+if resolved_svm_path is not None:
+    st.sidebar.caption(f"SVM model file: {resolved_svm_path}")
+else:
+    st.sidebar.warning("SVM model file not found.")
 
 left_column, right_column = st.columns([1, 1])
 
