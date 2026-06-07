@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 from PIL import Image
-from tensorflow import keras
 
 st.set_page_config(
     page_title="Flower Classification",
@@ -81,13 +80,23 @@ def load_svm_model():
 
 @st.cache_resource
 def load_cnn_model():
-    """Load the CNN Keras model."""
+    """Load the CNN Keras model if TensorFlow is available."""
     model_path = resolve_model_path("flower_cnn_efficientnetb0.keras")
 
     if model_path is None:
         st.error(
             "Error loading CNN model: file `flower_cnn_efficientnetb0.keras` was not found "
             f"in expected locations: {', '.join(str(path) for path in get_candidate_model_paths('flower_cnn_efficientnetb0.keras'))}"
+        )
+        return None
+
+    try:
+        from tensorflow import keras
+    except Exception as exc:
+        st.warning(
+            "CNN model is available, but TensorFlow is not installed in this deployment runtime. "
+            "SVM prediction will still run. "
+            f"TensorFlow import error: {exc}"
         )
         return None
 
