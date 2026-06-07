@@ -2,6 +2,7 @@
 import pickle
 from pathlib import Path
 
+import joblib
 import numpy as np
 import streamlit as st
 from PIL import Image
@@ -49,7 +50,12 @@ FLOWER_CLASSES = [
 
 @st.cache_resource
 def load_svm_model():
-    """Load the SVM model."""
+    """Load the SVM/MKL bundle.
+
+    The bundled SVM file was saved with joblib, not plain pickle. Loading it
+    with pickle can fail on Streamlit Cloud with errors such as
+    "invalid load key". Use joblib first and keep pickle only as a fallback.
+    """
     model_path = resolve_model_path("svm_mkl_bundle.pkl")
 
     if model_path is None:
@@ -60,22 +66,17 @@ def load_svm_model():
         return None
 
     try:
-        with open(model_path, "rb") as model_file:
-            header = model_file.read(16)
-            model_file.seek(0)
-
-            if not header.startswith(b"\x80"):
-                preview = header.decode("utf-8", errors="replace")
-                raise ValueError(
-                    "model file is not a valid pickle binary. "
-                    f"Resolved path: {model_path}. "
-                    f"File header preview: {preview!r}"
-                )
-
-            return pickle.load(model_file)
-    except Exception as exc:
-        st.error(f"Error loading SVM model from `{model_path}`: {exc}")
-        return None
+        return joblib.load(model_path)
+    except Exception as joblib_exc:
+        try:
+            with open(model_path, "rb") as model_file:
+                return pickle.load(model_file)
+        except Exception as pickle_exc:
+            st.warning(
+                "SVM model could not be loaded. "
+                f"joblib error: {joblib_exc}; pickle fallback error: {pickle_exc}"
+            )
+            return None
 
 
 @st.cache_resource
@@ -121,24 +122,101 @@ def preprocess_image_cnn(image, target_size=(224, 224)):
     return np.expand_dims(image_array, axis=0)
 
 
+def get_svm_estimator(model_bundle):
+    """Return the actual SVM estimator from either a model object or a bundle dict."""
+    if not isinstance(model_bundle, dict):
+        return model_bundle
+
+    for key in ("svm", "model", "classifier", "clf", "svc"):
+        candidate = model_bundle.get(key)
+        if candidate is not None and hasattr(candidate, "predict"):
+            return candidate
+
+    for candidate in model_bundle.values():
+        if hasattr(candidate, "predict"):
+            return candidate
+
+    return None
+
+
+def get_svm_class_names(model_bundle):
+    """Return class names stored in the bundle, falling back to the default list."""
+    if isinstance(model_bundle, dict):
+        class_names = model_bundle.get("class_names")
+        if class_names is not None:
+            return list(class_names)
+    return FLOWER_CLASSES
+
+
+def build_svm_feature_candidates(image, model_bundle):
+    """Build several safe feature candidates for different SVM bundle formats."""
+    raw_features = preprocess_image_svm(image)
+    candidates = [raw_features]
+
+    if isinstance(model_bundle, dict):
+        transformed_parts = []
+        for key in ("kmeans_internal", "kmeans_boundary", "kmeans"):
+            transformer = model_bundle.get(key)
+            if transformer is not None and hasattr(transformer, "transform"):
+                try:
+                    transformed_parts.append(transformer.transform(raw_features))
+                except Exception:
+                    pass
+
+        if transformed_parts:
+            candidates.extend(transformed_parts)
+            try:
+                candidates.append(np.concatenate(transformed_parts, axis=1))
+            except Exception:
+                pass
+
+    return candidates
+
+
+def predict_with_svm_estimator(estimator, feature_candidates):
+    """Try SVM prediction with available feature formats."""
+    last_error = None
+
+    for features in feature_candidates:
+        try:
+            prediction = estimator.predict(features)[0]
+            confidence = None
+            if hasattr(estimator, "predict_proba"):
+                confidence = float(np.max(estimator.predict_proba(features)[0]))
+            return prediction, confidence
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"No compatible SVM feature format found. Last error: {last_error}")
+
+
 def predict_svm(image):
-    """Make prediction using SVM model."""
-    model = load_svm_model()
-    if model is None:
+    """Make prediction using SVM model or SVM/MKL bundle."""
+    model_bundle = load_svm_model()
+    if model_bundle is None:
         return None, None
 
-    image_array = preprocess_image_svm(image)
-    prediction = model.predict(image_array)[0]
+    estimator = get_svm_estimator(model_bundle)
+    if estimator is None:
+        st.warning("SVM bundle was loaded, but no estimator with a predict method was found.")
+        return None, None
 
-    confidence = None
-    if hasattr(model, "predict_proba"):
-        confidence = float(np.max(model.predict_proba(image_array)[0]))
+    try:
+        feature_candidates = build_svm_feature_candidates(image, model_bundle)
+        prediction, confidence = predict_with_svm_estimator(estimator, feature_candidates)
+    except Exception as exc:
+        st.warning(f"SVM prediction could not be completed with the deployed bundle: {exc}")
+        return None, None
 
-    class_index = int(prediction)
-    if class_index < 0 or class_index >= len(FLOWER_CLASSES):
-        return "Unknown", confidence
+    class_names = get_svm_class_names(model_bundle)
 
-    return FLOWER_CLASSES[class_index], confidence
+    try:
+        class_index = int(prediction)
+        if class_index < 0 or class_index >= len(class_names):
+            return str(prediction), confidence
+        return class_names[class_index], confidence
+    except Exception:
+        return str(prediction), confidence
 
 
 def predict_cnn(image):
@@ -248,7 +326,7 @@ if uploaded_file is not None:
             with svm_column:
                 st.markdown("### SVM Result")
                 if svm_class is None:
-                    st.error("Failed to make SVM prediction. Please check if the SVM model is available.")
+                    st.warning("SVM prediction is currently unavailable for this deployed model bundle.")
                 else:
                     st.metric("Predicted Class", svm_class)
                     if svm_confidence is None:
